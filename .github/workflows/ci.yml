@@ -1,4 +1,4 @@
-name: CI project3 with Python
+name: CI/CD Project 4 with Docker
 
 on:
   push:
@@ -12,48 +12,69 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3 
+      uses: actions/checkout@v3
 
-    - name: Install dependencies
-      run: pip install -r requirements.txt
+    - name: Build Docker image
+      run: docker build -t flask-app:test .
 
     - name: Run tests
-      run: pytest
+      run: docker run flask-app:test pytest
 
-  deploy:
+  build-and-push:
     runs-on: ubuntu-latest
     needs: test
 
     steps:
-        - name: Deploy to EC2
-          uses: appleboy/ssh-action@v0.1.6
-          with:
-            host: ${{ secrets.EC2_HOST }}
-            username: ubuntu
-            key: ${{ secrets.EC2_SSH_PRIVATE_KEY_CICDPROJECT3 }}
-            script: |
-                cd /home/ubuntu/ci-cd-project-3
-                git pull origin main
-                pip3 install -r requirements.txt --break-system-packages
-                pkill gunicorn || true
-                gunicorn --bind 0.0.0.0:5000 app:app -D
+    - name: Checkout code
+      uses: actions/checkout@v3
 
-        - name: Health check
-          run: |
-                sleep 5
-                curl -f http://${{ secrets.EC2_HOST }}:5000
-                
-        - name: Rollback on failure
-          if: failure()
-          uses: appleboy/ssh-action@v0.1.6
-        
-          with:
-           host: ${{ secrets.EC2_HOST }}
-           username: ubuntu
-           key: ${{ secrets.EC2_SSH_PRIVATE_KEY_CICDPROJECT3 }}
-           script: |
-                cd /home/ubuntu/ci-cd-project-3
-                git reset --hard HEAD~1
-                pip3 install -r requirements.txt --break-system-packages
-                pkill gunicorn || true
-                gunicorn --bind 0.0.0.0:5000 app:app -D
+    - name: Log in to Docker Hub
+      run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+    - name: Build and tag image
+      run: |
+        docker build -t ${{ secrets.DOCKER_USERNAME }}/flask-app:${{ github.sha }} .
+        docker tag ${{ secrets.DOCKER_USERNAME }}/flask-app:${{ github.sha }} ${{ secrets.DOCKER_USERNAME }}/flask-app:latest
+
+    - name: Push to Docker Hub
+      run: |
+        docker push ${{ secrets.DOCKER_USERNAME }}/flask-app:${{ github.sha }}
+        docker push ${{ secrets.DOCKER_USERNAME }}/flask-app:latest
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Get previous commit SHA
+      run: echo "PREV_SHA=$(git rev-parse HEAD~1)" >> $GITHUB_ENV
+
+    - name: Deploy to EC2
+      uses: appleboy/ssh-action@v0.1.6
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ubuntu
+        key: ${{ secrets.EC2_SSH_PRIVATE_KEY_CICDPROJECT4 }}
+        script: |
+          docker pull ${{ secrets.DOCKER_USERNAME }}/flask-app:${{ github.sha }}
+          docker stop flask-app-container || true
+          docker run -d --name flask-app-container -p 5000:5000 ${{ secrets.DOCKER_USERNAME }}/flask-app:${{ github.sha }}
+
+    - name: Health check
+      run: |
+        sleep 5
+        curl -f http://${{ secrets.EC2_HOST }}:5000
+
+    - name: Rollback on failure
+      if: failure()
+      uses: appleboy/ssh-action@v0.1.6
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ubuntu
+        key: ${{ secrets.EC2_SSH_PRIVATE_KEY_CICDPROJECT4 }}
+        script: |
+          docker stop flask-app-container || true
+          docker run -d --name flask-app-container -p 5000:5000 ${{ secrets.DOCKER_USERNAME }}/flask-app:${{ env.PREV_SHA }}
